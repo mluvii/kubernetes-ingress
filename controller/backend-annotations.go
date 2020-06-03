@@ -15,6 +15,8 @@
 package controller
 
 import (
+	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -71,6 +73,7 @@ func (c *HAProxyController) handleBackendAnnotations(ingress *Ingress, service *
 		backendAnnotations["forwarded-for"], _ = GetValueFromAnnotations("forwarded-for", service.Annotations, ingress.Annotations, c.cfg.ConfigMap.Annotations)
 		backendAnnotations["path-rewrite"], _ = GetValueFromAnnotations("path-rewrite", service.Annotations, ingress.Annotations, c.cfg.ConfigMap.Annotations)
 		backendAnnotations["set-host"], _ = GetValueFromAnnotations("set-host", service.Annotations, ingress.Annotations, c.cfg.ConfigMap.Annotations)
+		backendAnnotations["whitelist"], _ = GetValueFromAnnotations("whitelist", service.Annotations)
 	}
 
 	// The DELETED status of an annotation is handled explicitly
@@ -172,6 +175,31 @@ func (c *HAProxyController) handleBackendAnnotations(ingress *Ingress, service *
 					continue
 				}
 				activeAnnotations = true
+			case "whitelist":
+				httpReqs := c.getBackendHTTPReqs(backend.Name)
+				delete(httpReqs.rules, WHITELIST)
+				if v.Status != DELETED || newBackend {
+					value := strings.Replace(v.Value, ",", " ", -1)
+					for _, address := range strings.Fields(value) {
+						if ip := net.ParseIP(address); ip == nil {
+							if _, _, err := net.ParseCIDR(address); err != nil {
+								c.Logger.Errorf("incorrect value for whitelist annotation in service '%s'", service.Name)
+								continue
+							}
+						}
+					}
+					httpRule := models.HTTPRequestRule{
+						Index:      utils.PtrInt64(0),
+						Type:       "deny",
+						DenyStatus: 403,
+						Cond:       "if",
+						CondTest:   fmt.Sprintf("!{ src %s }", value),
+					}
+					httpReqs.rules[WHITELIST] = httpRule
+				}
+				httpReqs.modified = true
+				activeAnnotations = true
+				c.cfg.BackendHTTPRules[backend.Name] = httpReqs
 			}
 		}
 	}
